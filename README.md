@@ -11,7 +11,9 @@ We are looking for candidates with strong programming skills and a basic underst
 To quickest way to run code in this repo is to use the following steps. 
 
 ## Step 1: Set up your Python environment
-Open a terminal and navigate to the root directory of the project and create a conda environment using the following command:
+You may want to set up a new environment and you will need to ensure that you have all the required packages, which are listed in 'requirements.txt' in this repository.
+
+One way to do this would be to open a terminal and navigate to the root directory of the project and create a conda environment using the following command:
 ```
 conda create -n blank python=3.12
 conda activate blank
