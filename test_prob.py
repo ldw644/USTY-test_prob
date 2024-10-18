@@ -289,9 +289,128 @@ df_curve_fortran = pd.read_pickle(OUTPUT_DIR+'/'+estfortdir+'/'+estfortfile+'_cu
 #  1) Merge the two dataframes (python curves and fortran curves) with a new index to spcify fortran vs python curve
 #  2) modify (and make a new function) for 'plot_fwdrate_wrapper' which will plot a fortran and python curve on the same graph
 #  3) Write out the new graphs, but to a new directory under 'output' so that you do not overwrite the original graphs
+class MergedCurve(object):
+    def _add_language_index(self, df_curve: pd.DataFrame, language: str) -> pd.DataFrame:
+        df_curve["language"] = language
+        df_curve = df_curve.reset_index().set_index(df_curve_python.index.names + ["language"])
+        return df_curve
 
+    def __init__(self, df_curve_python: pd.DataFrame, df_curve_fortran: pd.DataFrame) -> None:
+        self.df_curve_python =  df_curve_python
+        self.df_curve_fortran = df_curve_fortran
 
+        self.df_curve_merged = pd.concat([
+            self._add_language_index(self.df_curve_python, "python"),
+            self._add_language_index(self.df_curve_fortran, "fortran")
+        ])
 
+    def _find_max_min_fwd_rate(self, curve_df: pd.DataFrame) -> pd.DataFrame:
+        curve_df = curve_df.reset_index()
+        curve_df['quotedate_ind'] = curve_df['quotedate_ind'].astype(int).astype(str)
+        curve_df['year'] = pd.to_datetime(curve_df['quotedate_ind'], format='%Y%m%d').dt.year
+        curve_df['5_year_bin'] = (curve_df['year'] // 5) * 5
 
+        # Extract the max and min from the rates
+        curve_df['max_rate'] = curve_df['rates'].apply(lambda x: max(x))
+        curve_df['min_rate'] = curve_df['rates'].apply(lambda x: min(x))
+        
+        # Calculate 5-year rolling max and min for each ctype group
+        # curve_df['max_5yr'] = curve_df.groupby('type_ind')['max_rate'].transform(lambda x: x.rolling(window=5, min_periods=1).max())
+        # curve_df['min_5yr'] = curve_df.groupby('type_ind')['min_rate'].transform(lambda x: x.rolling(window=5, min_periods=1).min())
+        curve_df['max_5yr'] = curve_df.groupby(['type_ind', '5_year_bin'])['max_rate'].transform('max')
+        curve_df['min_5yr'] = curve_df.groupby(['type_ind', '5_year_bin'])['min_rate'].transform('min')
 
+        curve_df = curve_df.drop(['year'], axis=1)
+        curve_df['quotedate_ind'] = curve_df['quotedate_ind'].astype(int)
+        curve_df.set_index(['type_ind', 'quotedate_ind', 'language'], inplace=True, drop=True)
+
+        return curve_df
+
+    def plot_fwdrate_wrapper(self, output_dir: str, estfile: str, curvetypes: list, languages: list, plot_points_yr: np.ndarray, taxflag=False, sqrtscale=False, yield_to_worst=True, 
+                         start_date=None, end_date=None,pltshow=False) -> None:
+        """Plot and export to png in a created folder multiple forward curve plots by curvetype provided."""
+        curve_df = self.df_curve_merged
+        if start_date is not None and end_date is not None:
+            curve_df = curve_df.loc[(curve_df.index.get_level_values('quotedate_ind') >= start_date) & 
+                                    (curve_df.index.get_level_values('quotedate_ind') <= end_date)]
+
+        curve_df = self._find_max_min_fwd_rate(curve_df)
+        curve_points_day = plot_points_yr * 365.25
+
+        curvetypes_str = "_".join(curvetypes)
+        path = f"{output_dir}/fwd_rates_{curvetypes_str}"
+        try:
+            os.makedirs(path, exist_ok=True)
+            print(f"Directory '{path}' created")
+        except OSError as error:
+            print(f"Creation of the directory {path} failed due to: {error}")
+
+        #if not taxflag:
+        if (sqrtscale):
+            sqrt_plot_points_yr = np.sqrt(plot_points_yr)
+
+        # Loop through dates to create plots
+        for date in (curve_df.index.get_level_values('quotedate_ind').unique()):  # This references the 'quotedate_ind' index. Maybe there's a more elgant way?
+            julian_date = dates.YMDtoJulian(date)   # get the julian 
+            plot_points = julian_date + curve_points_day
+            curves_all = curve_df.xs(date,level="quotedate_ind")
+            
+            # for curvetype in curves_all.index.get_level_values('type_ind'):  # loop over curve types
+            for curvetype in curvetypes:
+                for language in languages:
+                    xcurvedf = curves_all.xs(curvetype,level="type_ind")
+                    
+                    if language in xcurvedf.index:
+                        xcurvedf = curves_all.xs(curvetype,level="type_ind").loc[language]
+                    else:
+                        continue
+                    curve = xcurvedf[0:4]  # select out the specific curve (this date)
+                    y_max = xcurvedf['max_5yr']
+                    y_min = xcurvedf['min_5yr']
+                    if not(yield_to_worst):
+                        yvols = np.round(xcurvedf['yvols'],decimals=4)
+                    term1 = df.discFact(plot_points + 1, curve)
+                    term2 = df.discFact(plot_points, curve)
+                    result = -365 * np.log(term1 / term2)
+                    if (sqrtscale):
+                        plt.plot(sqrt_plot_points_yr, 100*result,label=f'{curvetype} - {date} - {language}')
+                    else:
+                        plt.plot(plot_points_yr, 100*result,label=f'{curvetype} - {date} - {language}')
+            
+            plt.ylim(y_min*100 - 0.8 * abs(y_min*100), y_max*100 + 0.1 * abs(y_max*100))
+
+        # sqrt root ticks and labeling
+            if (sqrtscale):
+                x1 = max(plot_points_yr)
+                if (x1 > 20):
+                    plt.xticks(ticks=np.sqrt([0.25,1,2,5,10,20,30]).tolist(),labels=['0.25','1','2','5','10','20','30'])
+                elif (x1 > 10):
+                    plt.xticks(ticks=np.sqrt([0.25,1,2,5,10,20]).tolist(),labels=['0.25','1','2','5','10','20'])
+                elif (x1 >5):
+                    plt.xticks(ticks=np.sqrt([0.25,1,2,5,7,10]).tolist(),labels=['0.25','1','2','5','7','10'])
+                else :
+                    plt.xticks(ticks=np.sqrt([0.25,1,2,3,5]).tolist(),labels=['0.25','1','2','3','5'])
+                plt.xlabel('Maturity (Years, SqrRt Scale)')            
+            else:
+                plt.xlabel('Maturity (Years)')            
+
+            plt.title(f'Forward Rates for {date}, vol={yvols}' if not yield_to_worst else f'Forward Rates for {date}, Yield-to-Worst')
+
+            # plt.ylim(y_min*100 - 0.1 * abs(y_min*100), y_max*100 + 0.1 * abs(y_max*100))
+
+            plt.ylabel('Rate')
+            plt.legend()
+            plt.grid(True)
+            full_path = f'{output_dir}/fwd_rates_{curvetypes_str}'
+            os.makedirs(full_path, exist_ok=True)
+            plt.savefig(f'{full_path}/{date}_fwd_rate_{curvetypes_str}.png')
+            if pltshow:
+                plt.show()
+            plt.close()
+
+merged = MergedCurve(df_curve_python, df_curve_fortran)
+OUTPUT_DIR = "output/merged"
+for curvetypes in [['pwcf']]:  # , curvetypes2, curvetypes3
+    merged.plot_fwdrate_wrapper(OUTPUT_DIR, estfile, curvetypes, ["python","fortran"], plot_points_yr, False, sqrtscale, yield_to_worst, start_date, end_date,pltshow=pltshow)
+    # image_folder = os.path.join(OUTPUT_DIR, estfile, f'fwd_rates_{"_".join(curvetypes)}')
 
